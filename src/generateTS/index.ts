@@ -111,6 +111,7 @@ export const generateTS = async ({
 export const generateTSFromContentTypes = async ({
   contentTypes,
   prefix = "",
+  prefixing,
   includeDocumentation = true,
   systemFields = false,
 }: GenerateTSFromContentTypes) => {
@@ -121,7 +122,14 @@ export const generateTSFromContentTypes = async ({
     const globalFields = new Set();
     const definitions = [];
 
-    const tsgen = tsgenFactory({ docgen, naming: { prefix }, systemFields });
+    const tsgen = tsgenFactory({ 
+      docgen, 
+      naming: { 
+        prefix,
+        prefixing
+      }, 
+      systemFields 
+    });
     let hasJsonField = false;
     for (const contentType of contentTypes) {
       const tsgenResult = tsgen(contentType);

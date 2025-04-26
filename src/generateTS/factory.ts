@@ -1,12 +1,14 @@
 import { DocumentationGenerator } from "./docgen/doc";
 import NullDocumentationGenerator from "./docgen/nulldoc";
 import * as ContentstackTypes from "../types/schema";
+import { TypePrefixingOptions } from "../types";
 import * as _ from "lodash";
 
 export type TSGenOptions = {
   docgen: DocumentationGenerator;
   naming?: {
     prefix: string;
+    prefixing?: TypePrefixingOptions;
   };
   systemFields?: boolean;
 };
@@ -58,6 +60,7 @@ const defaultOptions: TSGenOptions = {
   docgen: new NullDocumentationGenerator(),
   naming: {
     prefix: "",
+    prefixing: { mode: 'none' }
   },
   systemFields: false,
 };
@@ -73,6 +76,48 @@ export default function (userOptions: TSGenOptions) {
   const modularBlockInterfaces = new Set<string>();
   const uniqueBlockInterfaces = new Set<string>();
   let counter = 1;
+  const usedTypeNames = new Set<string>();
+  
+  function shouldPrefixType(typeName: string): boolean {
+    const prefixing = options.naming?.prefixing;
+    if (!prefixing) return false;
+
+    if (prefixing.mode === 'all') {
+      return true;
+    }
+    
+    if (prefixing.mode === 'duplicates') {
+      // If specific types are provided, only prefix those
+      if (prefixing.types?.length) {
+        return prefixing.types.includes(typeName);
+      }
+      // Otherwise prefix if the type name has been used before
+      return usedTypeNames.has(typeName);
+    }
+
+    return false;
+  }
+
+  function name_type(uid: string, parentUid?: string) {
+    const baseName = _.upperFirst(_.camelCase(uid));
+    
+    // Track the base name before any prefixing
+    if (!usedTypeNames.has(baseName)) {
+      usedTypeNames.add(baseName);
+      // If this is the first occurrence and we're only prefixing duplicates, return as is
+      if (options.naming?.prefixing?.mode === 'duplicates') {
+        return baseName;
+      }
+    }
+
+    // Determine if we should prefix this type
+    if (shouldPrefixType(baseName)) {
+      const prefix = parentUid ? _.upperFirst(_.camelCase(parentUid)) : options?.naming?.prefix;
+      return [prefix, baseName].filter((v) => v).join("");
+    }
+
+    return baseName;
+  }
 
   const typeMap: TypeMap = {
     text: { func: type_text, track: true, flag: TypeFlags.BuiltinJS },
@@ -129,11 +174,6 @@ export default function (userOptions: TSGenOptions) {
         });
       }
     }
-  }
-
-  function name_type(uid: string, parentUid?: string) {
-    const prefix = parentUid ? _.upperFirst(_.camelCase(parentUid)) : options?.naming?.prefix;
-    return [prefix, _.upperFirst(_.camelCase(uid))].filter((v) => v).join("");
   }
 
   function define_interface(

@@ -7,9 +7,15 @@ export interface StackConnectionConfig {
   host?: string;
 }
 
+export interface TypePrefixingOptions {
+  mode: 'none' | 'all' | 'duplicates';
+  types?: string[]; // Specific type names to prefix, if provided
+}
+
 export interface GenerateTSBase extends StackConnectionConfig {
   tokenType: "delivery";
   prefix?: string;
+  prefixing?: TypePrefixingOptions;
   includeDocumentation?: boolean;
   systemFields?: boolean;
 }
@@ -23,6 +29,7 @@ export interface GraphQLBase extends StackConnectionConfig {
 export interface GenerateTSFromContentTypes {
   contentTypes: any[];
   prefix?: string;
+  prefixing?: TypePrefixingOptions;
   includeDocumentation?: boolean;
   systemFields?: boolean;
 }
