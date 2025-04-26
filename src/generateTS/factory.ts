@@ -131,10 +131,9 @@ export default function (userOptions: TSGenOptions) {
     }
   }
 
-  function name_type(uid: string) {
-    return [options?.naming?.prefix, _.upperFirst(_.camelCase(uid))]
-      .filter((v) => v)
-      .join("");
+  function name_type(uid: string, parentUid?: string) {
+    const prefix = parentUid ? _.upperFirst(_.camelCase(parentUid)) : options?.naming?.prefix;
+    return [prefix, _.upperFirst(_.camelCase(uid))].filter((v) => v).join("");
   }
 
   function define_interface(
@@ -146,7 +145,8 @@ export default function (userOptions: TSGenOptions) {
       name_type(
         contentType.data_type === "global_field"
           ? (contentType.reference_to as string)
-          : contentType.uid
+          : contentType.uid,
+        contentType.uid // Pass parent UID for prefixing
       ),
     ];
     if (systemFields && contentType.schema_type !== "global_field") {
