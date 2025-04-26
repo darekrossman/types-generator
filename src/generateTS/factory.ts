@@ -75,9 +75,90 @@ export default function (userOptions: TSGenOptions) {
   const cachedModularBlocks: ModularBlockCache = {};
   const modularBlockInterfaces = new Set<string>();
   const uniqueBlockInterfaces = new Set<string>();
-  let counter = 1;
   const usedTypeNames = new Set<string>();
-  
+  let counter = 1;
+
+  // Basic type generation functions
+  function type_text() {
+    return "string";
+  }
+
+  function type_number() {
+    return "number";
+  }
+
+  function type_boolean() {
+    return "boolean";
+  }
+
+  function type_link() {
+    return `${options.naming?.prefix}Link`;
+  }
+
+  function type_file(field: ContentstackTypes.Field): string {
+    if (field.uid === "parent_uid") {
+      return "string | null";
+    }
+    return `${options.naming?.prefix}File`;
+  }
+
+  function type_taxonomy() {
+    return `${options?.naming?.prefix}Taxonomy`;
+  }
+
+  function type_json_rte(field: ContentstackTypes.Field) {
+    let json_rte;
+    if (field.config && field.field_metadata?.extension) {
+      json_rte = `{ value: { key: string; value: string }[] }`;
+    } else {
+      json_rte = `{
+        type: string;
+        uid: string;
+        _version: number;
+        attrs: Record<string, any>;
+        children: JSONRTENode[];
+      }`;
+    }
+    return json_rte;
+  }
+
+  // Support functions
+  function op_array(type: string, field: ContentstackTypes.Field) {
+    let op = "";
+    if (field.multiple) {
+      op = "[]";
+      if (field.max_instance) {
+        return ["MaxTuple<", type, ", ", field.max_instance, ">"].join("");
+      }
+    }
+    return type + op;
+  }
+
+  function op_required(required: boolean) {
+    return required ? "" : "?";
+  }
+
+  function op_paren(block: string) {
+    return `(${block})`;
+  }
+
+  function visit_field_choices(field: ContentstackTypes.Field) {
+    const choices = field.enum.choices;
+    const length = choices.length;
+
+    if (!choices && !length) return "";
+
+    function get_value(choice: { value: string }) {
+      if (field.data_type === "number") {
+        return choice.value;
+      }
+      return `${JSON.stringify(choice.value)}`;
+    }
+
+    return op_paren(choices.map((v) => get_value(v)).join(" | "));
+  }
+
+  // Helper functions for type name management
   function shouldPrefixType(typeName: string): boolean {
     const prefixing = options.naming?.prefixing;
     if (!prefixing) return false;
@@ -87,12 +168,11 @@ export default function (userOptions: TSGenOptions) {
     }
     
     if (prefixing.mode === 'duplicates') {
-      // If specific types are provided, only prefix those
+      const isDuplicate = usedTypeNames.has(typeName);
       if (prefixing.types?.length) {
-        return prefixing.types.includes(typeName);
+        return prefixing.types.includes(typeName) || isDuplicate;
       }
-      // Otherwise prefix if the type name has been used before
-      return usedTypeNames.has(typeName);
+      return isDuplicate;
     }
 
     return false;
@@ -100,18 +180,11 @@ export default function (userOptions: TSGenOptions) {
 
   function name_type(uid: string, parentUid?: string) {
     const baseName = _.upperFirst(_.camelCase(uid));
+    const shouldPrefix = shouldPrefixType(baseName);
     
-    // Track the base name before any prefixing
-    if (!usedTypeNames.has(baseName)) {
-      usedTypeNames.add(baseName);
-      // If this is the first occurrence and we're only prefixing duplicates, return as is
-      if (options.naming?.prefixing?.mode === 'duplicates') {
-        return baseName;
-      }
-    }
-
-    // Determine if we should prefix this type
-    if (shouldPrefixType(baseName)) {
+    usedTypeNames.add(baseName);
+    
+    if (shouldPrefix) {
       const prefix = parentUid ? _.upperFirst(_.camelCase(parentUid)) : options?.naming?.prefix;
       return [prefix, baseName].filter((v) => v).join("");
     }
@@ -119,41 +192,81 @@ export default function (userOptions: TSGenOptions) {
     return baseName;
   }
 
+  // Complex type generation functions
+  function type_group(field: ContentstackTypes.Field) {
+    return ["{", visit_fields(field.schema), "}"].filter((v) => v).join("\n");
+  }
+
+  function type_modular_blocks(field: ContentstackTypes.Field): string {
+    let blockInterfaceName = name_type(field.uid);
+
+    const blockInterfaces = field.blocks.map((block) => {
+      const fieldType = block.reference_to
+        ? name_type(block.reference_to)
+        : visit_fields(block.schema || []);
+
+      const schema = block.reference_to
+        ? `${fieldType};`
+        : `{\n ${fieldType} }`;
+      return `${block.uid}: ${schema}`;
+    });
+
+    const blockInterfacesKey = blockInterfaces.join(";");
+
+    if (!uniqueBlockInterfaces.has(blockInterfacesKey)) {
+      uniqueBlockInterfaces.add(blockInterfacesKey);
+      while (cachedModularBlocks[blockInterfaceName]) {
+        blockInterfaceName = `${blockInterfaceName}${counter}`;
+        counter++;
+      }
+    }
+
+    const modularInterface = [
+      `export interface ${blockInterfaceName} {`,
+      blockInterfaces.join("\n"),
+      "}",
+    ].join("\n");
+
+    modularBlockInterfaces.add(modularInterface);
+    return field.multiple ? `${blockInterfaceName}[]` : blockInterfaceName;
+  }
+
+  function type_global_field(field: ContentstackTypes.GlobalField) {
+    if (!field.schema) {
+      throw new Error(`Schema not found for global field '${field.uid}'. Did you forget to include it?`);
+    }
+    return name_type(field.reference_to);
+  }
+
+  function type_reference(field: ContentstackTypes.Field) {
+    const references: string[] = [];
+    if (Array.isArray(field.reference_to)) {
+      field.reference_to.forEach((v) => {
+        references.push(name_type(v));
+      });
+    } else {
+      references.push(name_type(field.reference_to));
+    }
+    return ["(", references.join(" | "), ")", "[]"].join("");
+  }
+
+  // Type registration and mapping
   const typeMap: TypeMap = {
     text: { func: type_text, track: true, flag: TypeFlags.BuiltinJS },
     number: { func: type_number, track: true, flag: TypeFlags.BuiltinJS },
     isodate: { func: type_text, track: true, flag: TypeFlags.BuiltinJS },
     boolean: { func: type_boolean, track: true, flag: TypeFlags.BuiltinJS },
-    blocks: {
-      func: type_modular_blocks,
-      track: false,
-      flag: TypeFlags.UserBlock,
-    },
-    global_field: {
-      func: type_global_field,
-      track: true,
-      flag: TypeFlags.UserGlobalField,
-    },
+    blocks: { func: type_modular_blocks, track: false, flag: TypeFlags.UserBlock },
+    global_field: { func: type_global_field, track: true, flag: TypeFlags.UserGlobalField },
     group: { func: type_group, track: false, flag: TypeFlags.UserGroup },
     link: { func: type_link, track: true, flag: TypeFlags.BuiltinCS },
     file: { func: type_file, track: true, flag: TypeFlags.BuiltinCS },
-    reference: {
-      func: type_reference,
-      track: true,
-      flag: TypeFlags.UserReference,
-    },
-    taxonomy: {
-      func: type_taxonomy,
-      track: true,
-      flag: TypeFlags.BuiltinCS,
-    },
+    reference: { func: type_reference, track: true, flag: TypeFlags.UserReference },
+    taxonomy: { func: type_taxonomy, track: true, flag: TypeFlags.BuiltinCS },
   };
 
-  function track_dependency(
-    field: ContentstackTypes.Field,
-    type: string,
-    flag: TypeFlags
-  ) {
+  // Interface and field processing functions
+  function track_dependency(field: ContentstackTypes.Field, type: string, flag: TypeFlags) {
     if (flag === TypeFlags.BuiltinJS) {
       visitedJSTypes.add(type);
     } else if (flag === TypeFlags.UserGlobalField) {
@@ -176,64 +289,6 @@ export default function (userOptions: TSGenOptions) {
     }
   }
 
-  function define_interface(
-    contentType: ContentstackTypes.ContentType | ContentstackTypes.GlobalField,
-    systemFields = false
-  ) {
-    const interface_declaration = [
-      "export interface",
-      name_type(
-        contentType.data_type === "global_field"
-          ? (contentType.reference_to as string)
-          : contentType.uid,
-        contentType.uid // Pass parent UID for prefixing
-      ),
-    ];
-    if (systemFields && contentType.schema_type !== "global_field") {
-      interface_declaration.push("extends", name_type("SystemFields"));
-    }
-    return interface_declaration.join(" ");
-  }
-
-  function op_array(type: string, field: ContentstackTypes.Field) {
-    let op = "";
-
-    if (field.multiple) {
-      op = "[]";
-
-      if (field.max_instance) {
-        return ["MaxTuple<", type, ", ", field.max_instance, ">"].join("");
-      }
-    }
-
-    return type + op;
-  }
-
-  function op_required(required: boolean) {
-    return required ? "" : "?";
-  }
-
-  function op_paren(block: string) {
-    return `(${block})`;
-  }
-
-  function visit_field_choices(field: ContentstackTypes.Field) {
-    const choices = field.enum.choices;
-    const length = choices.length;
-
-    if (!choices && !length) return "";
-
-    function get_value(choice: { value: string }) {
-      if (field.data_type === "number") {
-        return choice.value;
-      }
-
-      return `${JSON.stringify(choice.value)}`;
-    }
-
-    return op_paren(choices.map((v) => get_value(v)).join(" | "));
-  }
-
   function visit_field_type(field: ContentstackTypes.Field) {
     let type = "any";
 
@@ -241,10 +296,8 @@ export default function (userOptions: TSGenOptions) {
       type = visit_field_choices(field);
     } else {
       const match = typeMap[field.data_type];
-
       if (match) {
         type = match.func(field);
-
         if (match.track) {
           track_dependency(field, type, match.flag);
         }
@@ -254,29 +307,18 @@ export default function (userOptions: TSGenOptions) {
     return op_array(type, field);
   }
 
-  const handleGlobalField = (field: ContentstackTypes.Field): string => {
-    const referenceName = name_type(field.reference_to);
-    // Return the reference name with array brackets if the field is multiple
-    return `${referenceName}${field.multiple ? "[]" : ""}`;
-  };
-  
-
   function visit_field(field: ContentstackTypes.Field) {
     let fieldType = "";
-    // Check if the field is a global field
     if (field.data_type === "global_field") {
       fieldType = handleGlobalField(field);
     } else if (field.data_type === "blocks") {
-      // Handle blocks type (unchanged)
       fieldType = type_modular_blocks(field);
     } else if (field.data_type === "json") {
       fieldType = type_json_rte(field);
     } else {
-      // Default handling if fieldType is still empty
       fieldType = visit_field_type(field);
     }
 
-    // Build and return the final string in the required format
     const requiredFlag = op_required(field.mandatory);
     const typeModifier =
       ["isodate", "file", "number"].includes(field.data_type) ||
@@ -286,7 +328,6 @@ export default function (userOptions: TSGenOptions) {
           : " | null"
         : "";
 
-    // Ensure the formatting is correct, and avoid concatenating field.uid directly to a string
     return `${field.uid}${requiredFlag}: ${fieldType}${typeModifier};`;
   }
 
@@ -304,15 +345,43 @@ export default function (userOptions: TSGenOptions) {
   }
 
   function visit_content_type(
-    contentType: ContentstackTypes.ContentType | ContentstackTypes.GlobalField
+    contentType: ContentstackTypes.ContentType | ContentstackTypes.GlobalField,
+    isFirstPass = false
   ) {
+    if (isFirstPass) {
+      // First pass - collect type names
+      modularBlockInterfaces.clear();
+      const typeName = _.upperFirst(_.camelCase(contentType.uid));
+      usedTypeNames.add(typeName);
+      
+      // Process field types in schema
+      contentType.schema?.forEach(field => {
+        if (field.data_type === 'blocks') {
+          field.blocks?.forEach(block => {
+            const blockName = _.upperFirst(_.camelCase(block.uid));
+            usedTypeNames.add(blockName);
+            if (block.schema) {
+              // Also collect types from block schemas
+              block.schema.forEach(blockField => {
+                const fieldTypeName = _.upperFirst(_.camelCase(blockField.uid));
+                usedTypeNames.add(fieldTypeName);
+              });
+            }
+          });
+        }
+      });
+      
+      return '';
+    }
+
+    // Normal pass - generate interfaces
     modularBlockInterfaces.clear();
     const contentTypeInterface = [
       options.docgen.interface(contentType.description),
       define_interface(contentType, options.systemFields),
       "{",
       ["/**", "Version", "*/"].join(" "),
-      `_version: number;`,
+      "_version: number;",
       visit_fields(contentType.schema),
       "}",
     ]
@@ -322,104 +391,40 @@ export default function (userOptions: TSGenOptions) {
     return [...modularBlockInterfaces, contentTypeInterface].join("\n\n");
   }
 
-  function type_modular_blocks(field: ContentstackTypes.Field): string {
-    let blockInterfaceName = name_type(field.uid);
+  const handleGlobalField = (field: ContentstackTypes.Field): string => {
+    const referenceName = name_type(field.reference_to);
+    // Return the reference name with array brackets if the field is multiple
+    return `${referenceName}${field.multiple ? "[]" : ""}`;
+  };
 
-    const blockInterfaces = field.blocks.map((block) => {
-      const fieldType = block.reference_to
-        ? name_type(block.reference_to)
-        : visit_fields(block.schema || []);
-
-      const schema = block.reference_to
-        ? `${fieldType};`
-        : `{\n ${fieldType} }`;
-      return `${block.uid}: ${schema}`;
-    });
-    const blockInterfacesKey = blockInterfaces.join(";");
-
-    if (!uniqueBlockInterfaces.has(blockInterfacesKey)) {
-      uniqueBlockInterfaces.add(blockInterfacesKey);
-      // Keep appending a counter until a unique name is found
-      while (cachedModularBlocks[blockInterfaceName]) {
-        blockInterfaceName = `${blockInterfaceName}${counter}`;
-        counter++;
-      }
+  function define_interface(
+    contentType: ContentstackTypes.ContentType | ContentstackTypes.GlobalField,
+    systemFields = false
+  ) {
+    const interface_declaration = [
+      "export interface",
+      name_type(
+        contentType.data_type === "global_field"
+          ? (contentType.reference_to as string)
+          : contentType.uid,
+        contentType.uid
+      ),
+    ];
+    if (systemFields && contentType.schema_type !== "global_field") {
+      interface_declaration.push("extends", name_type("SystemFields"));
     }
-
-    const modularInterface = [
-      `export interface ${blockInterfaceName} {`,
-      blockInterfaces.join("\n"),
-      "}",
-    ].join("\n");
-
-    // Store or track the generated block interface for later use
-    modularBlockInterfaces.add(modularInterface);
-
-    return field.multiple ? `${blockInterfaceName}[]` : blockInterfaceName;
-  }
-
-  function type_group(field: ContentstackTypes.Field) {
-    return ["{", visit_fields(field.schema), "}"].filter((v) => v).join("\n");
-  }
-
-  function type_text() {
-    return "string";
-  }
-
-  function type_number() {
-    return "number";
-  }
-
-  function type_boolean() {
-    return "boolean";
-  }
-
-  function type_link() {
-    return `${options.naming?.prefix}Link`;
-  }
-
-  function type_file(field: ContentstackTypes.Field): string {
-    // Check if the field is `parent_uid` and return its specific type
-    if (field.uid === "parent_uid") {
-      return "string | null"; // Explicitly handle `parent_uid`
-    }
-
-    // Default behavior with prefix support for other file-related fields
-    return `${options.naming?.prefix}File`;
-  }
-
-  function type_global_field(field: ContentstackTypes.GlobalField) {
-    if (!field.schema) {
-      throw new Error(
-        `Schema not found for global field '${field.uid}'. Did you forget to include it?`
-      );
-    }
-
-    return name_type(field.reference_to);
-  }
-
-  function type_reference(field: ContentstackTypes.Field) {
-    const references: string[] = [];
-
-    if (Array.isArray(field.reference_to)) {
-      field.reference_to.forEach((v) => {
-        references.push(name_type(v));
-      });
-    } else {
-      references.push(name_type(field.reference_to));
-    }
-
-    return ["(", references.join(" | "), ")", "[]"].join("");
+    return interface_declaration.join(" ");
   }
 
   return function (
-    contentType: ContentstackTypes.ContentType
+    contentType: ContentstackTypes.ContentType,
+    isFirstPass = false
   ): TSGenResult | any {
     if (contentType.schema_type === "global_field") {
       const name = name_type(contentType.uid);
       if (!cachedGlobalFields[name]) {
         cachedGlobalFields[name] = {
-          definition: visit_content_type(contentType),
+          definition: visit_content_type(contentType, isFirstPass),
         };
       }
       return {
@@ -428,7 +433,7 @@ export default function (userOptions: TSGenOptions) {
       };
     }
     return {
-      definition: visit_content_type(contentType),
+      definition: visit_content_type(contentType, isFirstPass),
       metadata: {
         name: name_type(contentType.uid),
         types: {
@@ -443,24 +448,4 @@ export default function (userOptions: TSGenOptions) {
       },
     };
   };
-
-  function type_taxonomy() {
-    return `${options?.naming?.prefix}Taxonomy`;
-  }
-
-  function type_json_rte(field: ContentstackTypes.Field) {
-    let json_rte;
-    if (field.config && field.field_metadata?.extension) {
-      json_rte = `{ value: { key: string; value: string }[] }`;
-    } else {
-      json_rte = `{
-      type: string;
-      uid: string;
-      _version: number;
-      attrs: Record<string, any>;
-      children: JSONRTENode[];
-    }`;
-    }
-    return json_rte;
-  }
 }

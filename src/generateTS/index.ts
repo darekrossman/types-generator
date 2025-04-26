@@ -130,7 +130,13 @@ export const generateTSFromContentTypes = async ({
       }, 
       systemFields 
     });
-    let hasJsonField = false;
+
+    // First pass - collect all type names
+    for (const contentType of contentTypes) {
+      tsgen(contentType, true);
+    }
+
+    // Second pass - generate interfaces
     for (const contentType of contentTypes) {
       const tsgenResult = tsgen(contentType);
       if (tsgenResult.isGlobalField) {
@@ -146,7 +152,7 @@ export const generateTSFromContentTypes = async ({
       }
     }
 
-    hasJsonField = contentTypes.some((contentType) => {
+    const hasJsonField = contentTypes.some((contentType) => {
       return contentType.schema.some(
         (field: {
           data_type: string;
